@@ -7,6 +7,7 @@ import queue
 import pystray
 from PIL import Image, ImageDraw
 from tkinter import simpledialog, messagebox
+import sys
 
 
 # -------------------- 全局变量 --------------------
@@ -23,6 +24,8 @@ heart_count = 0
 heart_sum = 0
 heart_max = 0
 heart_min = 0
+stop_event = threading.Event()
+BLE_LOOP = None
 
 # -------------------- 心率解析 --------------------
 def parse_heart_rate(data: bytearray) -> int:
@@ -45,26 +48,37 @@ def notification_handler(sender, data):
 
 # -------------------- BLE 后台线程 --------------------
 async def ble_task(address, uuid):
-    while True:
+    # 循环直到 stop_event 被设置
+    while not stop_event.is_set():
         try:
             async with BleakClient(address) as client:
                 print(f"✅ 已连接 {TARGET_NAME}, 开始接收心率...")
                 await client.start_notify(uuid, notification_handler)
-                while True:
+                while not stop_event.is_set():
                     if not client.is_connected:
                         print(f"⚠️ {TARGET_NAME} 已断开，重连中...")
                         break
                     await asyncio.sleep(1)
         except asyncio.CancelledError:
-            await asyncio.sleep(5)
+            # 任务被取消时短暂等待然后退出
+            await asyncio.sleep(1)
         except Exception as e:
             print(f"⚠️ BLE 异常: {e}, 5秒后重连")
             await asyncio.sleep(5)
 
 def start_ble_loop(address, uuid):
+    global BLE_LOOP
     loop = asyncio.new_event_loop()
+    BLE_LOOP = loop
     asyncio.set_event_loop(loop)
-    loop.run_until_complete(ble_task(address, uuid))
+    try:
+        loop.run_until_complete(ble_task(address, uuid))
+    finally:
+        try:
+            loop.run_until_complete(loop.shutdown_asyncgens())
+        except Exception:
+            pass
+        loop.close()
 
 # -------------------- 托盘 --------------------
 def create_image():
@@ -74,20 +88,53 @@ def create_image():
     return img
 
 def quit_app(icon_obj, item):
+    # 停止托盘图标循环
     icon_obj.stop()
+    # 通知 BLE 循环退出
+    stop_event.set()
+    # 尝试停止 BLE 事件循环以加速退出
+    try:
+        if BLE_LOOP is not None:
+            BLE_LOOP.call_soon_threadsafe(BLE_LOOP.stop)
+    except Exception:
+        pass
+
+    # Tk 操作必须在主线程执行，使用 root.after 调度
     if root:
-        root.destroy()
+        try:
+            root.after(0, root.destroy)
+        except Exception:
+            # 最后手段直接调用（有风险）
+            try:
+                root.destroy()
+            except Exception:
+                pass
 
 def restore_window(icon_obj, item):
-    if root:
+    # ensure GUI ops run on main thread
+    if not root:
+        return
+
+    def _restore():
         root.deiconify()
         if TRANSPARENT:
             root.overrideredirect(True)
             root.attributes("-topmost", True)
         else:
             root.overrideredirect(False)
-            notebook.pack(expand=True, fill="both")
-        icon.visible = False
+            try:
+                notebook.pack(expand=True, fill="both")
+            except Exception:
+                pass
+        try:
+            icon.visible = False
+        except Exception:
+            pass
+
+    try:
+        root.after(0, _restore)
+    except Exception:
+        _restore()
 
 def minimize_to_tray():
     global icon, icon_created
@@ -252,13 +299,15 @@ if __name__ == "__main__":
     asyncio.set_event_loop(loop)
     TARGET_ADDRESS, TARGET_NAME = loop.run_until_complete(select_device())
     if not TARGET_ADDRESS:
-        exit(1)
+        sys.exit(1)
 
     HEART_UUID = loop.run_until_complete(select_heart_uuid(TARGET_ADDRESS))
     if not HEART_UUID:
-        exit(1)
+        sys.exit(1)
 
+    # 启动 BLE 后台线程，传入 stop_event 用于优雅退出
     t = threading.Thread(target=start_ble_loop, args=(TARGET_ADDRESS, HEART_UUID), daemon=True)
     t.start()
 
     gui_app()
+    sys.exit(0)
