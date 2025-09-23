@@ -247,10 +247,20 @@ def gui_app():
             hr = heart_queue.get()
             current_heart_rate.set(f"{hr} bpm")
         root.after(500, update_gui)
+         # ==== 新增 on_close ====
+    def on_close():
+        if messagebox.askyesno("退出确认", "是否退出程序？"):
+            quit_app(icon, None)  # 彻底退出
+        else:
+            minimize_to_tray()    # 最小化到托盘
 
+    # 把 X 绑定成 on_close
     root.after(500, update_gui)
-    root.protocol("WM_DELETE_WINDOW", minimize_to_tray)
+    root.protocol("WM_DELETE_WINDOW", on_close)
     root.mainloop()
+
+    
+
 
 # -------------------- 蓝牙 --------------------
 async def select_device():
